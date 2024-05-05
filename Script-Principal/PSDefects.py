@@ -279,9 +279,9 @@ def Referencia(save_path='./captured_images', exposure_time=1500, num_images_per
 
 
 def send_email(subject, message_body):
-    sender_email = "reportesproquinaless@gmail.com"
-    receiver_email = "cristofher.solis@scientificmodeling.com"
-    password =  "olyi ulxz vane fmdr" 
+    sender_email = "-----@gmail.com"
+    receiver_email = "-----"
+    password =  "----" 
 
     # Create the email head (sender, receiver, and subject)
     email = MIMEMultipart()
