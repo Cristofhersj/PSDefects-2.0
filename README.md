@@ -5,3 +5,5 @@ Se trata de una segunda versión que añade varios cambios importantes en el fun
 - Optimización de procesos
 - Utilización de cámaras Basler
 - Control automático de luces por medio de microcontrolado
+
+En el documento "PSDefects Definición del proyecto" se desarrolla de forma resumida el cómo se abarca este proyecto.
