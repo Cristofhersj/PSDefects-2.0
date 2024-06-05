@@ -1,4 +1,4 @@
-#!/home/vioro/tr/.venv/bin/python3
+#!/home/soporte/.ESS_Vinyl_Inspector/Sources/.venv/bin/python3
 # coding=utf-8
 
 # The rest of your Python code follows
@@ -13,6 +13,9 @@ from pypylon import pylon
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from ultralytics import YOLO
+import torch
+
 
 
 # Global variables
@@ -92,71 +95,64 @@ def stop_capture():
     root.destroy()
 
 def update_images():
-    global reference_images, capture_counts, update_frequency
-    # Check if capturing is paused right at the start to avoid unnecessary processing
+    global reference_images, capture_counts, update_frequency, prev_defect_locations
     if not Captura:
         for camera in cameras:
             if camera.IsGrabbing():
                 camera.StopGrabbing()
-        return  # Exit the function if capturing is paused
+        return
 
     for i, camera in enumerate(cameras):
-        # Check again if capturing has been paused before trying to grab an image
         if not Captura:
             if camera.IsGrabbing():
                 camera.StopGrabbing()
-            continue  # Skip to the next iteration
-        
+            continue
+
         try:
             grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
             if grabResult.GrabSucceeded():
                 current_image = grabResult.GetArray()
                 current_image = cv2.cvtColor(current_image, cv2.COLOR_BAYER_BG2BGR)
-                current_image = cv2.cvtColor(current_image, cv2.COLOR_BGR2RGB)
 
-                if capture_counts[i] % 10 == 0:
-                    reference_images[i] = current_image.copy()
-                    print("Se actualizó la referencia")
+                processed_image, defects_found, defect_locations = process_yolo_detection(current_image, yolo_model)
 
-                processed_image, defects_found = process_contours(current_image, reference_images[i])
-
-                # Resize for display in the main image labels
                 processed_display_image = cv2.resize(processed_image, (320, 320))
-                img_display = Image.fromarray(processed_display_image).convert("RGB")
+                img_display = Image.fromarray(cv2.cvtColor(processed_display_image, cv2.COLOR_BGR2RGB))
                 img_display = ImageTk.PhotoImage(img_display)
                 image_labels[i].configure(image=img_display)
                 image_labels[i].image = img_display
 
                 if defects_found:
                     timestamp = time.strftime("%Y%m%d-%H%M%S")
-                    filename = f"/home/vioro/tr/defects_found/camera_{i+1}_defect_{timestamp}.png"
-                    cv2.imwrite(filename, cv2.cvtColor(processed_image, cv2.COLOR_RGB2BGR))
+                    filename = f"/home/soporte/.ESS_Vinyl_Inspector/Sources/Defects_Found/camera_{i+1}_defect_{timestamp}.jpg"
+                    
+                    # Compress and save the image
+                    compression_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+                    cv2.imwrite(filename, processed_image, compression_params)
 
-                    # Resize for display in the latest image labels (second row)
-                    # Adjust the size here to whatever is needed for the defect images
                     processed_defect_image = cv2.resize(processed_image, (320, 320))
-                    img_defect = Image.fromarray(processed_defect_image).convert("RGB")
+                    img_defect = Image.fromarray(cv2.cvtColor(processed_defect_image, cv2.COLOR_BGR2RGB))
                     img_defect = ImageTk.PhotoImage(img_defect)
-                    latest_image_labels[i].configure(image=img_defect)  # Assuming you want to use the same logic for the latest images
+                    latest_image_labels[i].configure(image=img_defect)
                     latest_image_labels[i].image = img_defect
 
-                    print(f"Defect detected, saving image as: {filename}")
                     if ser:
                         ser.write(b'G')
-                        print("Command 'G' sent through serial.")
+
                 capture_counts[i] += 1
-                #print("Cuenta de capturas: ", capture_counts)
             else:
                 print(f"Error: Camera {i+1} failed to grab.")
             grabResult.Release()
         except Exception as e:
             print(f"Exception during image grab: {e}")
-    
-    # Schedule the next call of update_images only if capturing is not paused
+
     if Captura:
         root.after(1, update_images)
 
 
+
+
+        
 def toggle_captura():
     global Captura, captura_button
     Captura = not Captura
@@ -171,7 +167,7 @@ def toggle_captura():
         captura_button.config(text="Reanudar")  # Update text to "Reanudar" when paused
 
 def open_defects_folder():
-    folder_path = "/home/vioro/tr/defects_found"
+    folder_path = "/home/soporte/.ESS_Vinyl_Inspector/Sources/Defects_Found"
     try:
         subprocess.run(['xdg-open', folder_path], check=True)
     except subprocess.CalledProcessError as e:
@@ -271,7 +267,7 @@ def Referencia(save_path='./captured_images', exposure_time=1500, num_images_per
     # Save images as PNG
     for i, img in enumerate(images_captured):
         if img is not None:
-            filename = os.path.join(save_path, f"camera_{i+1}_reference.png")
+            filename = os.path.join(save_path, f"camera_{i+1}_reference.jpg")
             cv2.imwrite(filename, img)
             print(f"Saved: {filename}")
 
@@ -279,9 +275,9 @@ def Referencia(save_path='./captured_images', exposure_time=1500, num_images_per
 
 
 def send_email(subject, message_body):
-    sender_email = "-----@gmail.com"
-    receiver_email = "-----"
-    password =  "----" 
+    sender_email = "reportesproquinaless@gmail.com"
+    receiver_email = "cristofher.solis@scientificmodeling.com"
+    password =  "olyi ulxz vane fmdr" 
 
     # Create the email head (sender, receiver, and subject)
     email = MIMEMultipart()
@@ -305,6 +301,59 @@ def send_email(subject, message_body):
         print(f"Failed to send email: {e}")
     finally:
         server.quit()
+        
+def process_yolo_detection(img, model, conf_threshold=0.3, y_threshold=200):
+    # Convert the image from BGR to RGB
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # Perform object detection
+    results = model(img_rgb)
+
+    defects_found = False
+    defect_locations = []
+
+    # Get image dimensions
+    img_height, img_width = img.shape[:2]
+
+    # Check if any defects were found
+    for result in results:
+        boxes = result.boxes
+        for box in boxes:
+            conf = box.conf[0].item()
+            if conf > conf_threshold:
+                # Get the coordinates of the bounding box
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                
+                # Filter out defects in the top 300 or bottom 300 pixels
+                if y1 >= y_threshold and y2 <= (img_height - y_threshold):
+                    defects_found = True
+                    defect_locations.append((x1, y1, x2, y2))
+
+    # Draw bounding boxes on the image
+    for (x1, y1, x2, y2) in defect_locations:
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+
+    return img, defects_found, defect_locations
+
+def calculate_iou(box1, box2):
+    x1_min, y1_min, x1_max, y1_max = box1
+    x2_min, y2_min, x2_max, y2_max = box2
+
+    # Calculate intersection
+    x_min = max(x1_min, x2_min)
+    y_min = max(y1_min, y2_min)
+    x_max = min(x1_max, x2_max)
+    y_max = min(y1_max, y2_max)
+    
+    intersection_area = max(0, x_max - x_min) * max(0, y_max - y_min)
+    
+    # Calculate union
+    box1_area = (x1_max - x1_min) * (y1_max - y1_min)
+    box2_area = (x2_max - x2_min) * (y2_max - y2_min)
+    union_area = box1_area + box2_area - intersection_area
+    
+    iou = intersection_area / union_area
+    return iou
 
 def compose_email():
     new_window = Toplevel()
@@ -330,6 +379,12 @@ def compose_email():
 
 
 # Setup serial connection at the beginning
+
+yolo_model = YOLO('/home/soporte/.ESS_Vinyl_Inspector/Sources/best.pt')  # or the path to your custom-trained model
+if torch.cuda.is_available():
+    print("CUDA is available. GPU acceleration will be used.")
+else:
+    print("CUDA is not available. GPU acceleration is not possible.")
 setup_serial()
 root = Tk()
 root.title("Camera Capture")
@@ -347,6 +402,7 @@ capture_counts = [0] * 4
 Captura = False
 latest_defect_images = [None] * 4  # Assuming 4 cameras
 cameras = []
+prev_defect_locations = [None] * 4  # To store previous defect locations for each camera
 latest_image_labels = []  # For displaying latest saved images
 image_labels = []
 
