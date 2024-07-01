@@ -1,0 +1,121 @@
+import PySpin
+import numpy as np
+import serial.tools.list_ports
+import time
+import cv2
+import threading
+import tkinter as tk
+from PIL import Image, ImageTk
+
+def list_serial_ports():
+    ports = serial.tools.list_ports.comports()
+    return [port.device for port in ports]
+
+def capture_continuous_images(serial_port):
+    # Initialize system and retrieve camera list
+    system = PySpin.System.GetInstance()
+    cam_list = system.GetCameras()
+
+    if cam_list.GetSize() == 0:
+        print("No cameras detected.")
+        cam_list.Clear()
+        system.ReleaseInstance()
+        return
+
+    root = tk.Tk()
+    root.title("Camera Viewer")
+
+    # Create labels to display the camera feeds
+    labels = [tk.Label(root) for _ in range(4)]
+    for i, label in enumerate(labels):
+        label.grid(row=i//2, column=i%2, padx=10, pady=10)
+
+    processors = []
+    for cam in cam_list:
+        cam.Init()
+        cam.AcquisitionMode.SetValue(PySpin.AcquisitionMode_Continuous)
+        cam.BeginAcquisition()
+
+        processor = PySpin.ImageProcessor()
+        processor.SetColorProcessing(PySpin.SPINNAKER_COLOR_PROCESSING_ALGORITHM_HQ_LINEAR)
+        processors.append(processor)
+
+    def update_labels():
+        nonlocal root, labels, processors
+        while True:
+            for i, cam in enumerate(cam_list):
+                try:
+                    # Retrieve next received image
+                    image_result = cam.GetNextImage()
+
+                    if image_result.IsIncomplete():
+                        print(f"Error: Camera {i+1} failed to grab image with status {image_result.GetImageStatus()}.")
+                    else:
+                        # Convert image to BGR8 format using ImageProcessor
+                        image_converted = processors[i].Convert(image_result, PySpin.PixelFormat_BGR8)
+
+                        # Get image width and height
+                        width = image_converted.GetWidth()
+                        height = image_converted.GetHeight()
+
+                        # Convert image data to numpy array
+                        image_data = image_converted.GetData()
+                        image_np = np.frombuffer(image_data, dtype=np.uint8)
+                        image_np = image_np.reshape((height, width, 3))
+
+                        # Convert BGR to RGB
+                        image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+
+                        # Resize image to 360x360
+                        image_resized = cv2.resize(image_rgb, (360, 360))
+
+                        # Convert resized image to PIL Image
+                        image_pil = Image.fromarray(image_resized)
+
+                        # Convert PIL image to Tkinter-compatible image
+                        image_tk = ImageTk.PhotoImage(image_pil)
+
+                        # Update the corresponding label with the new image
+                        if i < len(labels):
+                            labels[i].configure(image=image_tk)
+                            labels[i].image = image_tk  # Keep a reference to prevent garbage collection
+
+                        # Release image
+                        image_result.Release()
+
+                except PySpin.SpinnakerException as ex:
+                    print(f"Exception during image grab: {ex}")
+
+            root.update()  # Update tkinter GUI
+
+    # Start a thread to continuously update the labels with images
+    update_thread = threading.Thread(target=update_labels)
+    update_thread.start()
+
+    # Start tkinter main loop
+    root.mainloop()
+
+    # Cleanup cameras
+    for cam in cam_list:
+        cam.EndAcquisition()
+        cam.DeInit()
+
+    # Clear camera list before releasing system
+    cam_list.Clear()
+
+    # Release system instance
+    system.ReleaseInstance()
+
+if __name__ == "__main__":
+    # List available serial ports
+    ports = list_serial_ports()
+    print("Available serial ports:")
+    for i, port in enumerate(ports):
+        print(f"{i}: {port}")
+
+    # Ask user to select a port
+    port_index = int(input("Select the serial port index: "))
+    selected_port = ports[port_index]
+
+    # Example usage:
+    capture_continuous_images(selected_port)
