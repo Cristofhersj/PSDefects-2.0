@@ -15,10 +15,16 @@ from email.mime.text import MIMEText  # Library for creating email text parts
 from email.mime.multipart import MIMEMultipart  # Library for creating multipart email messages
 from ultralytics import YOLO  # Library for YOLO object detection
 import torch  # PyTorch library, which YOLO uses
+from datetime import datetime, timedelta  # Libraries for date and time handling
 
 # Global variables
 reference_images = []  # List to store reference images captured
 ser = None  # Serial connection object
+start_time = None  # Variable to store the start time
+
+# File to log elapsed times
+elapsed_time_log = "elapsed_time_log.txt"
+time_logs = {}  # Dictionary to store time logs by date
 
 # Setup the serial connection
 def setup_serial():
@@ -52,14 +58,25 @@ def find_arduino_port():
 
 # Setup camera settings
 def setup_camera(camera):
-    camera.ExposureTime.SetValue(1500)  # Set the exposure time of the camera
+    camera.ExposureTime.SetValue(2500)  # Set the exposure time of the camera
     camera.TriggerSelector.SetValue("FrameStart")  # Set the trigger selector to start frame capture
     camera.TriggerMode.SetValue("On")  # Enable trigger mode
     camera.TriggerSource.SetValue("Line1")  # Set the trigger source to Line1
+    camera.BslBrightness.SetValue(0) # Set brightness
+    camera.BslLightSourcePreset.SetValue("FactoryLED6000K")
+    camera.BalanceWhiteAuto.SetValue("Off")
+    camera.BalanceRatioSelector.SetValue("Red")
+    camera.BalanceRatio.SetValue(1.0)
+    camera.BalanceRatioSelector.SetValue("Green")
+    camera.BalanceRatio.SetValue(1.0)
+    camera.BalanceRatioSelector.SetValue("Blue")
+    camera.BalanceRatio.SetValue(1.0)
+
 
 # Start capturing images
 def start_capture():
-    global cameras, root, Captura, reference_images, ser
+    global cameras, root, Captura, reference_images, ser, start_time
+    start_time = time.time()  # Record the start time
     reference_images = Referencia()  # Capture and store reference images
     tl_factory = pylon.TlFactory.GetInstance()  # Get the transport layer factory for camera enumeration
     devices = tl_factory.EnumerateDevices()  # Enumerate all connected devices (cameras)
@@ -85,14 +102,35 @@ def start_capture():
 
 # Stop capturing images
 def stop_capture():
-    global cameras, Captura
+    global cameras, Captura, start_time, time_logs
     Captura = False  # Stop capturing
     cameras = []  # Reset the cameras list
+    
     for label in image_labels:
         label.configure(image="")  # Clear the image labels
     if ser:
         ser.write(b'P')  # Send 'P' command to stop the cycle
         print("Command 'P' sent through serial.")
+    if start_time:
+        elapsed_time = time.time() - start_time  # Calculate the elapsed time
+        current_date = datetime.now().strftime("%A %d of %B")  # Get the current date
+        start_time_str = datetime.now().strftime("%I:%M%p")
+        print(f"Elapsed time: {elapsed_time:.2f} seconds")  # Log the elapsed time
+
+        # Add the elapsed time to the logs dictionary
+        if current_date not in time_logs:
+            time_logs[current_date] = []
+        time_logs[current_date].append(elapsed_time)
+
+        # Append the logs to the file (open in append mode 'a')
+        with open(elapsed_time_log, 'a') as log_file:
+            for date, times in time_logs.items():
+                for t in times:
+                    hours, remainder = divmod(t, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    log_file.write(f"{date}: Starting at {start_time_str} {int(hours)} hours {int(minutes)} minutes {int(seconds)} seconds\n")
+
+
     root.destroy()  # Close the UI
 
 # Update images from cameras
@@ -126,7 +164,7 @@ def update_images():
 
                 if defects_found:
                     timestamp = time.strftime("%Y%m%d-%H%M%S")  # Generate a timestamp
-                    filename = f"/home/soporte/.ESS_Vinyl_Inspector/Sources/Defects_Found/camera_{i+1}_defect_{timestamp}.jpg"
+                    filename = f"/home/vioro/tr/defects_found/camera_{i+1}_defect_{timestamp}.jpg"
                     
                     # Compress and save the image
                     compression_params = [cv2.IMWRITE_JPEG_QUALITY, 90]  # Set compression parameters
@@ -146,32 +184,31 @@ def update_images():
                 print(f"Error: Camera {i+1} failed to grab.")  # Log error if image grab failed
             grabResult.Release()  # Release the grab result
         except Exception as e:
-            print(f"Exception during image grab: {e}")  # Log exception during image grab
+            print(f"Exception during image grab: {e}")  # Log exception during image grabbing
 
-    if Captura:
-        root.after(1, update_images)  # Schedule the next update if capture is still active
+    root.after(update_frequency, update_images)  # Schedule next update
 
-# Toggle image capturing on and off
+# Toggle image capturing state
 def toggle_captura():
-    global Captura, captura_button
-    Captura = not Captura  # Toggle capture state
+    global Captura, cameras
+    Captura = not Captura  # Toggle the capturing state
     if Captura:
         for camera in cameras:
-            camera.StartGrabbing(pylon.GrabStrategy_OneByOne)  # Start grabbing images one by one
-        update_images()  # Start updating images
-        captura_button.config(text="Pausar")  # Update button text to "Pausar" when capturing
+            camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)  # Start grabbing latest image only
+        captura_button.config(text="Pausar")  # Change button text to "Pausar"
     else:
         for camera in cameras:
             camera.StopGrabbing()  # Stop grabbing images
-        captura_button.config(text="Reanudar")  # Update button text to "Reanudar" when paused
+        captura_button.config(text="Reanudar")  # Change button text to "Reanudar"
+    update_images()  # Update images
 
 # Open the folder containing defect images
 def open_defects_folder():
-    folder_path = "/home/soporte/.ESS_Vinyl_Inspector/Sources/Defects_Found"  # Path to the defects folder
+    folder_path = "/home/vioro/tr/defects_found"  # Path to the defects folder
     try:
-        subprocess.run(['xdg-open', folder_path], check=True)  # Open the folder using the default file manager
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to open the folder: {e}")  # Log error if folder opening fails
+        subprocess.run(['xdg-open', folder_path], check=True)  # Open the folder using xdg-open
+    except Exception as e:
+        print(f"Failed to open folder: {e}")  # Log error if folder opening fails
 
 # Capture and store reference images from all cameras
 def Referencia():
@@ -221,7 +258,7 @@ def send_email(subject, message_body):
         server.quit()  # Close the SMTP server connection
 
 # Process YOLO detection on an image
-def process_yolo_detection(img, model, conf_threshold=0.3, y_threshold=200):
+def process_yolo_detection(img, model, conf_threshold=0.1, y_threshold=100):
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert the image to RGB
     results = model(img_rgb)  # Run YOLO detection on the image
 
@@ -269,7 +306,7 @@ def compose_email():
     send_button.pack()
 
 # Setup serial connection at the beginning
-yolo_model = YOLO('/home/soporte/.ESS_Vinyl_Inspector/Sources/best.pt')  # Load YOLO model
+yolo_model = YOLO('/home/vioro/tr/train/detect/train/weights/best.pt')  # or the path to your custom-trained model
 if torch.cuda.is_available():
     print("CUDA is available. GPU acceleration will be used.")
 else:
@@ -277,15 +314,17 @@ else:
 setup_serial()
 
 # Initialize the Tkinter window
+# Initialize the Tkinter window
 root = Tk()
 root.title("Camera Capture")
+root.configure(bg="#2e2e2e")  # Dark grey background
 
 # Create a top title label
-top_title_label = Label(root, text="Último Defecto Detectado", font=("Helvetica", 20))
+top_title_label = Label(root, text="Último Defecto Detectado", font=("Helvetica", 20), bg="#2e2e2e",fg="#ffffff")
 top_title_label.pack(side="top", pady=10)  # pady adds some padding above and below the label
 
 # Frame for latest images
-latest_images_frame = Frame(root)
+latest_images_frame = Frame(root, bg="#2e2e2e")
 latest_images_frame.pack(side=TOP, pady=(5, 0))
 update_frequency = 10
 reference_images = []  # To store reference images captured
@@ -297,17 +336,17 @@ prev_defect_locations = [None] * 4  # To store previous defect locations for eac
 latest_image_labels = []  # For displaying latest saved images
 image_labels = []
 
-captura_button = Button(root, text="Pausar", command=toggle_captura)
+captura_button = Button(root, text="Pausar", command=toggle_captura, bg="#2e2e2e",fg="#ffffff")
 
 # Label for real-time camera view
-ultimo_defecto_label = Label(root, text="Cámaras en Tiempo Real", font=("Helvetica", 16))
+ultimo_defecto_label = Label(root, text="Cámaras en Tiempo Real", font=("Helvetica", 16), bg="#2e2e2e",fg="#ffffff")
 ultimo_defecto_label.pack(side=TOP, pady=(5, 0))
 
 # Initialize labels for each camera feed
 for i in range(4):
     img = Image.new('RGB', (320, 320), color=(0, 0, 0))
     img = ImageTk.PhotoImage(img)
-    label = Label(root, image=img)
+    label = Label(root, image=img, bg="#2e2e2e",highlightbackground="#2e2e2e", highlightcolor="#2e2e2e", highlightthickness=1)
     label.pack(side=LEFT)
     image_labels.append(label)
 
@@ -315,38 +354,22 @@ for i in range(4):
 for i in range(4):
     img = Image.new('RGB', (320, 320), color=(0, 0, 0))  # Smaller size for latest images
     img = ImageTk.PhotoImage(img)
-    label = Label(latest_images_frame, image=img)
+    label = Label(latest_images_frame, image=img, bg="#2e2e2e",highlightbackground="#2e2e2e", highlightcolor="#2e2e2e", highlightthickness=1)
     label.pack(side=LEFT, padx=(5, 0))
     latest_image_labels.append(label)
 
 # Add buttons for different functionalities
-compose_email_button = Button(root, text="Reportar Error", command=compose_email)
+compose_email_button = Button(root, text="Reportar Error", command=compose_email, bg="#2e2e2e",highlightbackground="#2e2e2e", highlightcolor="#2e2e2e", highlightthickness=1,fg="#ffffff")
 compose_email_button.pack(pady=20)
 
-start_button = Button(root, text="Iniciar", command=start_capture)
+start_button = Button(root, text="Iniciar", command=start_capture, bg="#2e2e2e",highlightbackground="#2e2e2e", highlightcolor="#2e2e2e", highlightthickness=1,fg="#ffffff")
 start_button.pack(side=TOP)
 
-stop_button = Button(root, text="Cerrar", command=stop_capture)
+stop_button = Button(root, text="Cerrar", command=stop_capture, bg="#2e2e2e",highlightbackground="#2e2e2e", highlightcolor="#2e2e2e", highlightthickness=1,fg="#ffffff")
 stop_button.pack(side=TOP)
 
-open_folder_button = Button(root, text="Abrir Carpeta con Defectos", command=open_defects_folder)
+open_folder_button = Button(root, text="Abrir Carpeta con Defectos", command=open_defects_folder, bg="#2e2e2e",highlightbackground="#2e2e2e", highlightcolor="#2e2e2e", highlightthickness=1,fg="#ffffff")
 open_folder_button.pack(side=TOP)
 
 # Run the Tkinter main loop
-root.mainloop()
-
-compose_email_button = Button(root, text="Reportar Error", command=compose_email)
-compose_email_button.pack(pady=20)
-
-
-
-start_button = Button(root, text="Iniciar", command=start_capture)
-start_button.pack(side=TOP)
-
-stop_button = Button(root, text="Cerrar", command=stop_capture)
-stop_button.pack(side=TOP)
-
-open_folder_button = Button(root, text="Abrir Carpeta con Defectos", command=open_defects_folder)
-open_folder_button.pack(side=TOP)
-
 root.mainloop()
