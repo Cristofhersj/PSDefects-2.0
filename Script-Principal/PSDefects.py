@@ -173,19 +173,6 @@ def open_defects_folder():
     except subprocess.CalledProcessError as e:
         print(f"Failed to open the folder: {e}")  # Log error if folder opening fails
 
-# Calculate the difference between two images
-def calculate_difference(img1, img2):
-    diff = cv2.absdiff(img1, img2)  # Calculate absolute difference between two images
-    _, diff = cv2.threshold(diff, 11, 255, cv2.THRESH_BINARY)  # Apply binary thresholding
-    return diff  # Return the thresholded difference
-
-# Denoise a binary image using erosion and dilation
-def denoise_image(binary_image):
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))  # Define a 3x3 rectangular kernel
-    eroded = cv2.erode(binary_image, kernel, iterations=2)  # Apply erosion
-    dilated = cv2.dilate(eroded, kernel, iterations=2)  # Apply dilation
-    return dilated  # Return the denoised image
-
 # Capture and store reference images from all cameras
 def Referencia():
     reference_images = []  # List to store captured reference images
