@@ -1,0 +1,7 @@
+Este link tiene un tutorial de cómo entrenar un modelo Yolov8 genérico y uno con un dataset customisado
+https://colab.research.google.com/github/roboflow-ai/notebooks/blob/main/notebooks/train-yolov8-object-detection-on-custom-dataset.ipynb
+
+Para la aplicación de PSDefects, se diseñó un datasaet propio utilizando datos proporsionados por Proquinal, este se encuentra en:
+https://app.roboflow.com/ess-dqbsu/psdefects/models
+
+En caso de querer editar el dataset se puede utilizar la base existente en Roboflow o bien usar cualquier otra herramienta para generar el dataset deseado
