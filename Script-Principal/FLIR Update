@@ -1,121 +1,396 @@
-import PySpin
-import numpy as np
-import serial.tools.list_ports
-import time
+#!/home/soporte/.ESS_Vinyl_Inspector/Sources/.venv/bin/python3
+# coding=utf-8
+
+# The rest of your Python code follows
+from tkinter import *
 import cv2
-import threading
-import tkinter as tk
 from PIL import Image, ImageTk
+import os
+import subprocess
+import time
+import serial.tools.list_ports
+from pypylon import pylon
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from ultralytics import YOLO
+import torch
 
-def list_serial_ports():
-    ports = serial.tools.list_ports.comports()
-    return [port.device for port in ports]
 
-def capture_continuous_images(serial_port):
-    # Initialize system and retrieve camera list
-    system = PySpin.System.GetInstance()
-    cam_list = system.GetCameras()
 
-    if cam_list.GetSize() == 0:
-        print("No cameras detected.")
-        cam_list.Clear()
-        system.ReleaseInstance()
+# Global variables
+reference_images = []  # To store reference images captured
+ser = None
+
+def setup_serial():
+    global ser
+    arduino_port = find_arduino_port()
+    if arduino_port:
+        ser = serial.Serial(arduino_port, 9600, timeout=1)
+        time.sleep(2)
+        print("Serial connection established.")
+
+def find_arduino_port():
+    available_ports = serial.tools.list_ports.comports()
+
+    for port in available_ports:
+        print(port.device, "-", port.description)
+
+    arduino_ports = [
+        port.device
+        for port in available_ports
+        if 'ttyACM0' in port.description
+    ]
+
+    if arduino_ports:
+        arduino_port = arduino_ports[0]
+        print("Arduino found on port:", arduino_port)
+        return arduino_port
+    else:
+        print("No Arduino found")
+        return None
+
+def setup_camera(camera):
+    camera.ExposureTime.SetValue(1500)
+    camera.TriggerSelector.SetValue("FrameStart")
+    camera.TriggerMode.SetValue("On")
+    camera.TriggerSource.SetValue("Line1")
+
+# Example mapping of friendly names to camera numbers
+
+def start_capture():
+    global cameras, root, Captura, reference_images, ser
+    reference_images = Referencia()  # Capture and store reference images
+    tl_factory = pylon.TlFactory.GetInstance()
+    devices = tl_factory.EnumerateDevices()
+    if len(devices) == 0:
+        raise pylon.RuntimeException("No camera present.")
+
+    cameras = []
+    for i, device in enumerate(devices):
+        camera = pylon.InstantCamera(tl_factory.CreateDevice(device))
+        camera.Open()
+        setup_camera(camera)
+        cameras.append(camera)
+        print(f"Camera {i+1}: Exposure time set to 5000 and configured for hardware trigger on Line 1")
+
+    if ser:
+        ser.write(b'F')  # Send 'F' only once when setting up the serial connection
+        print("Command 'F' sent. Cycle started.")
+    
+    start_button.config(state=DISABLED)
+    start_button.destroy()
+    toggle_captura()  # Start capturing images automatically
+    captura_button.pack(side=LEFT)  # Show the Pause button
+
+def stop_capture():
+    global cameras, Captura
+    Captura = False
+    cameras = []  # Reset the cameras list
+    for label in image_labels:
+        label.configure(image="")
+    if ser:
+                        ser.write(b'P')
+                        print("Command 'P' sent through serial.")
+    root.destroy()
+
+def update_images():
+    global reference_images, capture_counts, update_frequency, prev_defect_locations
+    if not Captura:
+        for camera in cameras:
+            if camera.IsGrabbing():
+                camera.StopGrabbing()
         return
 
-    root = tk.Tk()
-    root.title("Camera Viewer")
+    for i, camera in enumerate(cameras):
+        if not Captura:
+            if camera.IsGrabbing():
+                camera.StopGrabbing()
+            continue
 
-    # Create labels to display the camera feeds
-    labels = [tk.Label(root) for _ in range(4)]
-    for i, label in enumerate(labels):
-        label.grid(row=i//2, column=i%2, padx=10, pady=10)
+        try:
+            grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+            if grabResult.GrabSucceeded():
+                current_image = grabResult.GetArray()
+                current_image = cv2.cvtColor(current_image, cv2.COLOR_BAYER_BG2BGR)
 
-    processors = []
-    for cam in cam_list:
-        cam.Init()
-        cam.AcquisitionMode.SetValue(PySpin.AcquisitionMode_Continuous)
-        cam.BeginAcquisition()
+                processed_image, defects_found, defect_locations = process_yolo_detection(current_image, yolo_model)
 
-        processor = PySpin.ImageProcessor()
-        processor.SetColorProcessing(PySpin.SPINNAKER_COLOR_PROCESSING_ALGORITHM_HQ_LINEAR)
-        processors.append(processor)
+                processed_display_image = cv2.resize(processed_image, (320, 320))
+                img_display = Image.fromarray(cv2.cvtColor(processed_display_image, cv2.COLOR_BGR2RGB))
+                img_display = ImageTk.PhotoImage(img_display)
+                image_labels[i].configure(image=img_display)
+                image_labels[i].image = img_display
 
-    def update_labels():
-        nonlocal root, labels, processors
-        while True:
-            for i, cam in enumerate(cam_list):
-                try:
-                    # Retrieve next received image
-                    image_result = cam.GetNextImage()
+                if defects_found:
+                    timestamp = time.strftime("%Y%m%d-%H%M%S")
+                    filename = f"/home/soporte/.ESS_Vinyl_Inspector/Sources/Defects_Found/camera_{i+1}_defect_{timestamp}.jpg"
+                    
+                    # Compress and save the image
+                    compression_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+                    cv2.imwrite(filename, processed_image, compression_params)
 
-                    if image_result.IsIncomplete():
-                        print(f"Error: Camera {i+1} failed to grab image with status {image_result.GetImageStatus()}.")
-                    else:
-                        # Convert image to BGR8 format using ImageProcessor
-                        image_converted = processors[i].Convert(image_result, PySpin.PixelFormat_BGR8)
+                    processed_defect_image = cv2.resize(processed_image, (320, 320))
+                    img_defect = Image.fromarray(cv2.cvtColor(processed_defect_image, cv2.COLOR_BGR2RGB))
+                    img_defect = ImageTk.PhotoImage(img_defect)
+                    latest_image_labels[i].configure(image=img_defect)
+                    latest_image_labels[i].image = img_defect
 
-                        # Get image width and height
-                        width = image_converted.GetWidth()
-                        height = image_converted.GetHeight()
+                    if ser:
+                        ser.write(b'G')
 
-                        # Convert image data to numpy array
-                        image_data = image_converted.GetData()
-                        image_np = np.frombuffer(image_data, dtype=np.uint8)
-                        image_np = image_np.reshape((height, width, 3))
+                capture_counts[i] += 1
+            else:
+                print(f"Error: Camera {i+1} failed to grab.")
+            grabResult.Release()
+        except Exception as e:
+            print(f"Exception during image grab: {e}")
 
-                        # Convert BGR to RGB
-                        image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+    if Captura:
+        root.after(1, update_images)
 
-                        # Resize image to 360x360
-                        image_resized = cv2.resize(image_rgb, (360, 360))
 
-                        # Convert resized image to PIL Image
-                        image_pil = Image.fromarray(image_resized)
 
-                        # Convert PIL image to Tkinter-compatible image
-                        image_tk = ImageTk.PhotoImage(image_pil)
 
-                        # Update the corresponding label with the new image
-                        if i < len(labels):
-                            labels[i].configure(image=image_tk)
-                            labels[i].image = image_tk  # Keep a reference to prevent garbage collection
+        
+def toggle_captura():
+    global Captura, captura_button
+    Captura = not Captura
+    if Captura:
+        for camera in cameras:
+            camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
+        update_images()
+        captura_button.config(text="Pausar")  # Update text to "Pausar" when capturing
+    else:
+        for camera in cameras:
+            camera.StopGrabbing()
+        captura_button.config(text="Reanudar")  # Update text to "Reanudar" when paused
 
-                        # Release image
-                        image_result.Release()
+def open_defects_folder():
+    folder_path = "/home/soporte/.ESS_Vinyl_Inspector/Sources/Defects_Found"
+    try:
+        subprocess.run(['xdg-open', folder_path], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to open the folder: {e}")
 
-                except PySpin.SpinnakerException as ex:
-                    print(f"Exception during image grab: {ex}")
+def calculate_difference(img1, img2):
+    diff = cv2.absdiff(img1, img2)
+    _, diff = cv2.threshold(diff, 11, 255, cv2.THRESH_BINARY)
+    return diff
 
-            root.update()  # Update tkinter GUI
+def denoise_binary_image(binary_image, kernel_size=3):
+    # Apply erosion to remove small white regions and protrusions
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    eroded_image = cv2.erode(binary_image, kernel, iterations=1)
 
-    # Start a thread to continuously update the labels with images
-    update_thread = threading.Thread(target=update_labels)
-    update_thread.start()
+    # Apply dilation to add small white regions and broaden protrusions
+    dilated_image = cv2.dilate(eroded_image, kernel, iterations=1)
 
-    # Start tkinter main loop
-    root.mainloop()
+    return dilated_image
 
-    # Cleanup cameras
-    for cam in cam_list:
-        cam.EndAcquisition()
-        cam.DeInit()
+def Referencia(save_path='./captured_images', exposure_time=1500, num_images_per_camera=1):
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
 
-    # Clear camera list before releasing system
-    cam_list.Clear()
+    tl_factory = pylon.TlFactory.GetInstance()
+    devices = tl_factory.EnumerateDevices()
+    if len(devices) == 0:
+        raise pylon.RuntimeException("No camera present.")
 
-    # Release system instance
-    system.ReleaseInstance()
+    num_cameras = len(devices)
+    cameras = pylon.InstantCameraArray(num_cameras)
+    images_captured = []  # To store reference images captured
 
-if __name__ == "__main__":
-    # List available serial ports
-    ports = list_serial_ports()
-    print("Available serial ports:")
-    for i, port in enumerate(ports):
-        print(f"{i}: {port}")
+    for i, cam in enumerate(cameras):
+        cam.Attach(tl_factory.CreateDevice(devices[i]))
+        cam.Open()
+        cam.ExposureTime.SetValue(exposure_time)
+        setup_camera(cam)  # Set up hardware trigger
+        print(f"Camera {i+1}: Exposure time set to {exposure_time} and configured for hardware trigger on Line 1")
 
-    # Ask user to select a port
-    port_index = int(input("Select the serial port index: "))
-    selected_port = ports[port_index]
+    if ser:
+                        ser.write(b'F')
+                        print("Command 'F' sent through serial.")
+    cameras.StartGrabbing(pylon.GrabStrategy_OneByOne)
 
-    # Example usage:
-    capture_continuous_images(selected_port)
+    try:
+        while cameras.IsGrabbing() and len(images_captured) < num_cameras:
+            grabResult = cameras.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+            camera_index = grabResult.GetCameraContext()  # Identifies which camera provided the image
+            if grabResult.GrabSucceeded():
+                # Convert grabbed image to RGB
+                img = grabResult.GetArray()
+                img = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2BGR)
+                images_captured.append(img)  # Add the captured image to the list
+            else:
+                print(f"Error: Camera {camera_index+1} failed to grab.")
+            grabResult.Release()
+
+    finally:
+        # Stop grabbing and close all cameras
+        cameras.StopGrabbing()
+        for cam in cameras:
+            cam.Close()
+        ser.write(b'P')
+        print("Command 'P' sent. Cycle Ended.")
+
+    # Save images as PNG
+    for i, img in enumerate(images_captured):
+        if img is not None:
+            filename = os.path.join(save_path, f"camera_{i+1}_reference.jpg")
+            cv2.imwrite(filename, img)
+            print(f"Saved: {filename}")
+
+    return images_captured  # Return the list of captured images
+
+
+def send_email(subject, message_body):
+    sender_email = "reportesproquinaless@gmail.com"
+    receiver_email = "cristofher.solis@scientificmodeling.com"
+    password =  "olyi ulxz vane fmdr" 
+
+    # Create the email head (sender, receiver, and subject)
+    email = MIMEMultipart()
+    email["From"] = sender_email
+    email["To"] = receiver_email
+    email["Subject"] = subject
+
+    # Attach the email body
+    email.attach(MIMEText(message_body, "plain"))
+
+    # Connect to the SMTP server and send the email
+    try:
+        # Note: You might need to update the SMTP server and port for Gmail
+        server = smtplib.SMTP('smtp.gmail.com', 587)  
+        server.starttls()
+        server.login(sender_email, password)
+        text = email.as_string()
+        server.sendmail(sender_email, receiver_email, text)
+        print("Email sent successfully!")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+    finally:
+        server.quit()
+        
+def process_yolo_detection(img, model, conf_threshold=0.3, y_threshold=200):
+    # Convert the image from BGR to RGB
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # Perform object detection
+    results = model(img_rgb)
+
+    defects_found = False
+    defect_locations = []
+
+    # Get image dimensions
+    img_height, img_width = img.shape[:2]
+
+    # Check if any defects were found
+    for result in results:
+        boxes = result.boxes
+        for box in boxes:
+            conf = box.conf[0].item()
+            if conf > conf_threshold:
+                # Get the coordinates of the bounding box
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                
+                # Filter out defects in the top 300 or bottom 300 pixels
+                if y1 >= y_threshold and y2 <= (img_height - y_threshold):
+                    defects_found = True
+                    defect_locations.append((x1, y1, x2, y2))
+
+    # Draw bounding boxes on the image
+    for (x1, y1, x2, y2) in defect_locations:
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+
+    return img, defects_found, defect_locations
+
+def compose_email():
+    new_window = Toplevel()
+    new_window.title("Reportar Error")
+    new_window.geometry("400x300")
+
+    Label(new_window, text="Asunto:").pack()
+    subject_entry = Entry(new_window, width=50)
+    subject_entry.pack()
+
+    Label(new_window, text="Describa el Error:").pack()
+    message_text = Text(new_window, height=10, width=50)
+    message_text.pack()
+
+    def on_send():
+        subject = subject_entry.get()
+        message_body = message_text.get("1.0", "end-1c")
+        send_email(subject, message_body)
+        new_window.destroy()
+
+    send_button = Button(new_window, text="Enviar", command=on_send)
+    send_button.pack()
+
+
+# Setup serial connection at the beginning
+
+yolo_model = YOLO('/home/soporte/.ESS_Vinyl_Inspector/Sources/best.pt')  # or the path to your custom-trained model
+if torch.cuda.is_available():
+    print("CUDA is available. GPU acceleration will be used.")
+else:
+    print("CUDA is not available. GPU acceleration is not possible.")
+setup_serial()
+root = Tk()
+root.title("Camera Capture")
+
+# Create a top title label
+top_title_label = Label(root, text="Último Defecto Detectado", font=("Helvetica", 20))
+top_title_label.pack(side="top", pady=10)  # pady adds some padding above and below the label
+
+
+latest_images_frame = Frame(root)
+latest_images_frame.pack(side=TOP, pady=(5, 0))
+update_frequency = 10
+reference_images = []  # To store reference images captured
+capture_counts = [0] * 4
+Captura = False
+latest_defect_images = [None] * 4  # Assuming 4 cameras
+cameras = []
+prev_defect_locations = [None] * 4  # To store previous defect locations for each camera
+latest_image_labels = []  # For displaying latest saved images
+image_labels = []
+
+captura_button = Button(root, text="Pausar", command=toggle_captura)
+
+ultimo_defecto_label = Label(root, text="Cámaras en Tiempo Real", font=("Helvetica", 16))
+ultimo_defecto_label.pack(side=TOP, pady=(5, 0))
+
+for i in range(4):
+    img = Image.new('RGB', (320, 320), color=(0, 0, 0))
+    img = ImageTk.PhotoImage(img)
+    label = Label(root, image=img)
+    label.pack(side=LEFT)
+    image_labels.append(label)
+
+# Add label for "Último defecto detectado"
+
+
+# Prepare labels for latest saved images
+for i in range(4):
+    img = Image.new('RGB', (320, 320), color=(0, 0, 0))  # Smaller size for latest images
+    img = ImageTk.PhotoImage(img)
+    label = Label(latest_images_frame, image=img)
+    label.pack(side=LEFT, padx=(5, 0))
+    latest_image_labels.append(label)
+
+compose_email_button = Button(root, text="Reportar Error", command=compose_email)
+compose_email_button.pack(pady=20)
+
+
+
+start_button = Button(root, text="Iniciar", command=start_capture)
+start_button.pack(side=TOP)
+
+stop_button = Button(root, text="Cerrar", command=stop_capture)
+stop_button.pack(side=TOP)
+
+open_folder_button = Button(root, text="Abrir Carpeta con Defectos", command=open_defects_folder)
+open_folder_button.pack(side=TOP)
+
+root.mainloop()
